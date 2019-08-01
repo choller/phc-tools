@@ -14,12 +14,15 @@
 import argparse
 import json
 import os
+import requests
 import sys
 
 symbols = {}
 filemap = {}
 
 line_symbols_cache = {}
+
+SOCORRO_AUTH_TOKEN = os.getenv("SOCORRO_AUTH_TOKEN")
 
 
 def load_symbols(module, symfile):
@@ -60,6 +63,19 @@ def load_symbols(module, symfile):
                 # address size line filenum
                 # a51fd3 35 433 14574
                 line_symbols_cache[symfile].append(line)
+
+
+def load_symbols_recursive(symbols_dir):
+        for (path, dirs, files) in os.walk(symbols_dir):
+            for file in files:
+                fp_file = os.path.join(path, file)
+
+                if fp_file.endswith(".sym"):
+                    rel_file = fp_file.replace(symbols_dir, "", 1)
+                    comps = rel_file.split(os.sep)
+                    module = os.path.splitext(comps[-1])[0]
+
+                    load_symbols(module, fp_file)
 
 
 def retrieve_file_line_data_linear(symbol_entry, reladdr):
@@ -145,6 +161,70 @@ def read_extra_file(extra_file):
     return (alloc_stack, free_stack, module_memory_map)
 
 
+def fetch_socorro_crash(crash_id):
+    headers = {'Auth-Token': SOCORRO_AUTH_TOKEN}
+
+    raw_url = 'https://crash-stats.mozilla.org/api/RawCrash/?crash_id=%s&format=meta' % crash_id
+    processed_url = 'https://crash-stats.mozilla.org/api/ProcessedCrash/?crash_id=%s&datatype=processed' % crash_id
+
+    response = requests.get(raw_url, headers=headers)
+
+    if not response.ok:
+        print("Error: Failed to fetch raw data from Socorro", file=sys.stderr)
+        return (None, None, None)
+
+    raw_data = response.json()
+
+    if "PHCAllocStack" not in raw_data:
+        print("Error: No PHCAllocStack in raw data, is this really a PHC crash?", file=sys.stderr)
+        return (None, None, None)
+
+    alloc_stack = [int(x) for x in raw_data["PHCAllocStack"].split(",")]
+    free_stack = [int(x) for x in raw_data["PHCFreeStack"].split(",")]
+
+    response = requests.get(processed_url, headers=headers)
+
+    if not response.ok:
+        print("Error: Failed to fetch processed data from Socorro", file=sys.stderr)
+        return (None, None, None)
+
+    processed_data = response.json()
+
+    module_memory_map = {}
+    remote_symbols_files = set()
+
+    for module in processed_data["json_dump"]["modules"]:
+        module_memory_map[module["filename"]] = (int(module["base_addr"], 16), int(module["end_addr"], 16))
+        if "symbol_url" in module:
+            remote_symbols_files.add(module["symbol_url"])
+
+    return (alloc_stack, free_stack, module_memory_map, remote_symbols_files)
+
+
+def fetch_remote_symbols(url, symbols_dir):
+    url_comps = url.split("/")
+    dest_dir = os.path.join(symbols_dir, url_comps[-2])
+
+    if not os.path.exists(dest_dir):
+        os.makedirs(dest_dir)
+
+    dest_file = os.path.join(dest_dir, url_comps[-1])
+
+    sys.stderr.write("Fetching %s ... " % url)
+
+    if os.path.exists(dest_file):
+        print(" cached!", file=sys.stderr)
+        return
+
+    response = requests.get(url)
+    print("done!", file=sys.stderr)
+
+    with open(dest_file, 'w') as fd:
+        fd.write(response.text)
+
+    return
+
+
 def main(argv=None):
     '''Command line options.'''
 
@@ -154,7 +234,8 @@ def main(argv=None):
         argv = sys.argv[1:]
 
     # setup argparser
-    parser = argparse.ArgumentParser(usage='%s EXTRA_FILE SYMBOLS_DIR' % program_name)
+    parser = argparse.ArgumentParser(usage='%s (EXTRA_FILE SYMBOLS_DIR | --remote CRASH_ID)' % program_name)
+    parser.add_argument("--remote", dest="remote", help="Remote mode, fetch a crash from Socorro", metavar="CRASH_ID")
     parser.add_argument('rargs', nargs=argparse.REMAINDER)
 
     if not argv:
@@ -163,36 +244,61 @@ def main(argv=None):
 
     opts = parser.parse_args(argv)
 
-    if len(opts.rargs) < 2:
+    if not opts.remote and len(opts.rargs) < 2:
         parser.print_help()
         return 2
 
-    extra_file = opts.rargs[0]
-    symbols_dir = opts.rargs[1]
+    # We need two stacks, the allocation stack and the free stack
+    alloc_stack = None
+    free_stack = None
 
-    if not os.path.isfile(extra_file):
-        print("Invalid .extra file specified", file=sys.stderr)
-        return 2
+    # The module memory map contains all the information about loaded
+    # modules and their address ranges, required to resolve absolute
+    # addresses to relative debug symbol addresses.
+    module_memory_map = None
 
-    if not os.path.isdir(symbols_dir):
-        print("Invalid symbols directory specified", file=sys.stderr)
-        return 2
+    # Directory where we either have local symbols or store remote symbols
+    symbols_dir = None
 
-    if not symbols_dir.endswith(os.sep):
+    if opts.remote:
+        if SOCORRO_AUTH_TOKEN is None:
+            print("Error: Must specify SOCORRO_AUTH_TOKEN in environment for remote actions.", file=sys.stderr)
+            return 2
+
+        (alloc_stack, free_stack, module_memory_map, remote_symbols_files) = fetch_socorro_crash(opts.remote)
+
+        symbols_dir = os.path.join(os.path.expanduser("~"), ".phc-symbols-cache")
         symbols_dir += os.sep
 
-    print("Loading symbols...", file=sys.stderr)
+        if not os.path.exists(symbols_dir):
+            os.mkdir(symbols_dir)
 
-    for (path, dirs, files) in os.walk(symbols_dir):
-        for file in files:
-            fp_file = os.path.join(path, file)
+        for symbol_url in remote_symbols_files:
+            fetch_remote_symbols(symbol_url, symbols_dir)
 
-            if fp_file.endswith(".sym"):
-                rel_file = fp_file.replace(symbols_dir, "", 1)
-                comps = rel_file.split(os.sep)
-                module = comps[0]
+        sys.stderr.write("Loading downloaded symbols...")
+        load_symbols_recursive(symbols_dir)
+        print(" done!", file=sys.stderr)
+    else:
+        extra_file = opts.rargs[0]
+        symbols_dir = opts.rargs[1]
 
-                load_symbols(module, fp_file)
+        if not os.path.isfile(extra_file):
+            print("Invalid .extra file specified", file=sys.stderr)
+            return 2
+
+        if not os.path.isdir(symbols_dir):
+            print("Invalid symbols directory specified", file=sys.stderr)
+            return 2
+
+        if not symbols_dir.endswith(os.sep):
+            symbols_dir += os.sep
+
+        sys.stderr.write("Loading local symbols...")
+        load_symbols_recursive(symbols_dir)
+        print(" done!", file=sys.stderr)
+
+        (alloc_stack, free_stack, module_memory_map) = read_extra_file(extra_file)
 
     def print_stack(phc_stack, name, symbols, module_memory_map):
         stack_cnt = 0
@@ -229,7 +335,7 @@ def main(argv=None):
                     break
 
             if not symbol_entry:
-                print("#%s    ???" % stack_cnt)
+                print("#%s    ??? (unresolved symbol in %s)" % (stack_cnt, module))
             else:
                 (line, filenum) = retrieve_file_line_data_binsearch(symbol_entry, reladdr)
                 symfile = symbol_entry[3]
@@ -238,8 +344,7 @@ def main(argv=None):
 
             stack_cnt += 1
 
-    (alloc_stack, free_stack, module_memory_map) = read_extra_file(extra_file)
-
+    print("")
     print_stack(free_stack, "Free", symbols, module_memory_map)
     print("")
     print_stack(alloc_stack, "Alloc", symbols, module_memory_map)
