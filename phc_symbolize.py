@@ -20,6 +20,9 @@ import sys
 symbols = {}
 filemap = {}
 
+# Public symbols have a lower priority because they lack file/line information
+symbols_public = {}
+
 line_symbols_cache = {}
 
 SOCORRO_AUTH_TOKEN = os.getenv("SOCORRO_AUTH_TOKEN")
@@ -47,8 +50,18 @@ def load_symbols(module, symfile):
                 # multiple times per module, in distinct symbols files).
                 filemap[symfile][tmp[1]] = tmp[2]
             elif line.startswith("PUBLIC "):
-                # Not supported currently
-                pass
+                # PUBLIC 7f5c0 0 gdk_x11_get_server_time
+                tmp = line.split(" ", maxsplit=3)
+                symbol_start = int(tmp[1], 16)
+
+                if module not in symbols_public:
+                    symbols_public[module] = []
+                else:
+                    # Set the end of the last symbol we parsed
+                    symbols_public[module][-1][1] = symbol_start
+
+                # Push new symbol with 0 as end, so we can fix it later
+                symbols_public[module].append([symbol_start, 0, tmp[3]])
             elif line.startswith("STACK "):
                 pass
             elif line.startswith("INFO "):
@@ -335,7 +348,17 @@ def main(argv=None):
                     break
 
             if not symbol_entry:
-                print("#%s    ??? (unresolved symbol in %s)" % (stack_cnt, module))
+                # There is still a chance that we have a PUBLIC symbol without
+                # file/line information available.
+                if module in symbols_public:
+                    for sym in symbols_public[module]:
+                        if sym[0] <= reladdr and sym[1] > reladdr:
+                            print("#%s    %s (%s +%s)" % (stack_cnt, sym[2], module, hex(reladdr)))
+                            symbol_entry = sym
+                            break
+
+                if not symbol_entry:
+                    print("#%s    ??? (unresolved symbol in %s +%s)" % (stack_cnt, module, hex(reladdr)))
             else:
                 (line, filenum) = retrieve_file_line_data_binsearch(symbol_entry, reladdr)
                 symfile = symbol_entry[3]
