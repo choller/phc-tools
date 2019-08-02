@@ -323,7 +323,7 @@ def main(argv=None):
                 continue
 
             if module not in symbols:
-                print("#%s    (missing symbols for module %s)" % (stack_cnt, module))
+                print("#%s    (missing symbols for module %s %s)" % (stack_cnt, module, hex(reladdr)))
                 stack_cnt += 1
                 continue
 
