@@ -350,9 +350,15 @@ def main(argv=None):
                 continue
 
             if module not in symbols:
-                print("#%s    (missing symbols for module %s %s)" % (stack_cnt, module, hex(reladdr)))
-                stack_cnt += 1
-                continue
+                # On Windows, the sym file is called xul.sym, *not* xul.dll.sym
+                # unlike on Linux where it is called xul.so.sym.
+                tmp = os.path.splitext(module)[0]
+                if tmp in symbols:
+                    module = tmp
+                else:
+                    print("#%s    (missing symbols for module %s %s)" % (stack_cnt, module, hex(reladdr)))
+                    stack_cnt += 1
+                    continue
 
             symbol_entry = None
             for sym in symbols[module]:
