@@ -50,9 +50,16 @@ def load_symbols(module, symfile):
                 # multiple times per module, in distinct symbols files).
                 filemap[symfile][tmp[1]] = tmp[2]
             elif line.startswith("PUBLIC "):
-                # PUBLIC 7f5c0 0 gdk_x11_get_server_time
+                # PUBLIC (m) 7f5c0 0 gdk_x11_get_server_time
                 tmp = line.split(" ", maxsplit=3)
-                symbol_start = int(tmp[1], 16)
+
+                # Support the optional "m" indicator for folded code
+                base_idx = 0
+                if tmp[1] == 'm':
+                    base_idx = 1
+                    tmp = line.split(" ", maxsplit=4)
+
+                symbol_start = int(tmp[base_idx + 1], 16)
 
                 if module not in symbols_public:
                     symbols_public[module] = []
@@ -61,15 +68,22 @@ def load_symbols(module, symfile):
                     symbols_public[module][-1][1] = symbol_start
 
                 # Push new symbol with 0 as end, so we can fix it later
-                symbols_public[module].append([symbol_start, 0, tmp[3]])
+                symbols_public[module].append([symbol_start, 0, tmp[base_idx + 3]])
             elif line.startswith("STACK "):
                 pass
             elif line.startswith("INFO "):
                 pass
             elif line.startswith("FUNC "):
-                # FUNC 8e5440 14e 0 webrtc::AudioProcessingImpl::Initialize
+                # FUNC (m) 8e5440 14e 0 webrtc::AudioProcessingImpl::Initialize
                 tmp = line.split(" ", maxsplit=4)
-                comps = [int(tmp[1], 16), int(tmp[2], 16), tmp[4], symfile]
+
+                # Support the optional "m" indicator for folded code
+                base_idx = 0
+                if tmp[1] == 'm':
+                    base_idx = 1
+                    tmp = line.split(" ", maxsplit=5)
+
+                comps = [int(tmp[base_idx + 1], 16), int(tmp[base_idx + 2], 16), tmp[base_idx + 4], symfile]
                 symbols[module].append(comps)
             else:
                 # This is a line entry:
