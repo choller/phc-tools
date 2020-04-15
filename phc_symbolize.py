@@ -201,22 +201,25 @@ def fetch_socorro_crash(crash_id):
 
     if not response.ok:
         print("Error: Failed to fetch raw data from Socorro", file=sys.stderr)
-        return (None, None, None)
+        return (None, None, None, None, None)
 
     raw_data = response.json()
 
     if "PHCAllocStack" not in raw_data:
         print("Error: No PHCAllocStack in raw data, is this really a PHC crash?", file=sys.stderr)
-        return (None, None, None)
+        return (None, None, None, None, None)
 
     alloc_stack = [int(x) for x in raw_data["PHCAllocStack"].split(",")]
-    free_stack = [int(x) for x in raw_data["PHCFreeStack"].split(",")]
+    if "PHCFreeStack" in raw_data:
+        free_stack = [int(x) for x in raw_data["PHCFreeStack"].split(",")]
+    else:
+        free_stack = None
 
     response = requests.get(processed_url, headers=headers)
 
     if not response.ok:
         print("Error: Failed to fetch processed data from Socorro", file=sys.stderr)
-        return (None, None, None)
+        return (None, None, None, None, None)
 
     processed_data = response.json()
 
@@ -329,34 +332,35 @@ def main(argv=None):
                 "memoryMap": memory_map_remote,
                 "stacks": []
             }
-            for stack in [free_stack, alloc_stack]:
-                stacks = []
-                for addr in stack:
-                    (module, reladdr) = find_module(addr, module_memory_map)
+            for stack in [alloc_stack, free_stack]:
+                if stack is not None:
+                    stacks = []
+                    for addr in stack:
+                        (module, reladdr) = find_module(addr, module_memory_map)
 
-                    if module is None:
-                        stacks.append([0, 0])
-                        continue
+                        if module is None:
+                            stacks.append([0, 0])
+                            continue
 
-                    if module not in debugmap:
-                        stacks.append([0, 0])
-                        continue
+                        if module not in debugmap:
+                            stacks.append([0, 0])
+                            continue
 
-                    idx = 0
-                    found = False
-                    for map_entry in memory_map_remote:
-                        if map_entry[0] == debugmap[module]:
-                            found = True
-                            break
-                        idx += 1
+                        idx = 0
+                        found = False
+                        for map_entry in memory_map_remote:
+                            if map_entry[0] == debugmap[module]:
+                                found = True
+                                break
+                            idx += 1
 
-                    if not found:
-                        print("Error: Module entry not found: %s" % module, file=sys.stderr)
-                        return 2
+                        if not found:
+                            print("Error: Module entry not found: %s" % module, file=sys.stderr)
+                            return 2
 
-                    stacks.append([idx, reladdr])
+                        stacks.append([idx, reladdr])
 
-                request["stacks"].append(stacks)
+                    request["stacks"].append(stacks)
 
             symbol_server_response = requests.post("https://symbols.mozilla.org/symbolicate/v5", json=request).json()
             if "results" not in symbol_server_response:
@@ -457,13 +461,15 @@ def main(argv=None):
 
     if symbol_server_response:
         stacks = symbol_server_response["results"][0]["stacks"]
+        if (len(stacks) > 1):
+            print("")
+            print_stack_remote(stacks[1], "Free")
         print("")
-        print_stack_remote(stacks[0], "Free")
-        print("")
-        print_stack_remote(stacks[1], "Alloc")
+        print_stack_remote(stacks[0], "Alloc")
     else:
-        print("")
-        print_stack(free_stack, "Free", symbols, module_memory_map)
+        if free_stack is not None:
+            print("")
+            print_stack(free_stack, "Free", symbols, module_memory_map)
         print("")
         print_stack(alloc_stack, "Alloc", symbols, module_memory_map)
 
