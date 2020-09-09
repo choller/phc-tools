@@ -27,6 +27,9 @@ line_symbols_cache = {}
 
 SOCORRO_AUTH_TOKEN = os.getenv("SOCORRO_AUTH_TOKEN")
 
+# A mapping from filename to debug_file to save us from doing platform-specific
+# conversions to get the debug_file name.
+debugmap = {}
 
 def load_symbols(module, symfile):
     if module not in symbols:
@@ -220,12 +223,16 @@ def fetch_socorro_crash(crash_id):
     module_memory_map = {}
     remote_symbols_files = set()
 
+    # A list of pairs (debug_name/debug_id) for the symbol server remote API
+    memory_map_remote = []
     for module in processed_data["json_dump"]["modules"]:
         module_memory_map[module["filename"]] = (int(module["base_addr"], 16), int(module["end_addr"], 16))
         if "symbol_url" in module:
             remote_symbols_files.add(module["symbol_url"])
+            memory_map_remote.append([module["debug_file"], module["debug_id"]])
+            debugmap[module["filename"]] = module["debug_file"]
 
-    return (alloc_stack, free_stack, module_memory_map, remote_symbols_files)
+    return (alloc_stack, free_stack, module_memory_map, remote_symbols_files, memory_map_remote)
 
 
 def fetch_remote_symbols(url, symbols_dir):
@@ -252,6 +259,24 @@ def fetch_remote_symbols(url, symbols_dir):
     return
 
 
+def find_module(addr, module_memory_map):
+    # Figure out which module this address belongs to
+    (module, reladdr) = (None, None)
+    for module_cand in module_memory_map:
+        base_addr = module_memory_map[module_cand][0]
+        end_addr = module_memory_map[module_cand][1]
+
+        if addr >= base_addr and addr < end_addr:
+            module = module_cand
+            reladdr = addr - base_addr
+            break
+
+    if not module:
+        return (None, None)
+
+    return (module, reladdr)
+
+
 def main(argv=None):
     '''Command line options.'''
 
@@ -263,6 +288,7 @@ def main(argv=None):
     # setup argparser
     parser = argparse.ArgumentParser(usage='%s (EXTRA_FILE SYMBOLS_DIR | --remote CRASH_ID)' % program_name)
     parser.add_argument("--remote", dest="remote", help="Remote mode, fetch a crash from Socorro", metavar="CRASH_ID")
+    parser.add_argument("--parse-local", dest="parse_local", help="Download symbol files and parse them locally", action="store_true")
     parser.add_argument('rargs', nargs=argparse.REMAINDER)
 
     if not argv:
@@ -287,25 +313,69 @@ def main(argv=None):
     # Directory where we either have local symbols or store remote symbols
     symbols_dir = None
 
+    # Symbol server response, in case we use the remote API
+    symbol_server_response = None
+
     if opts.remote:
         if SOCORRO_AUTH_TOKEN is None:
             print("Error: Must specify SOCORRO_AUTH_TOKEN in environment for remote actions.", file=sys.stderr)
             return 2
 
-        (alloc_stack, free_stack, module_memory_map, remote_symbols_files) = fetch_socorro_crash(opts.remote)
+        (alloc_stack, free_stack, module_memory_map, remote_symbols_files, memory_map_remote) = fetch_socorro_crash(opts.remote)
 
-        symbols_dir = os.path.join(os.path.expanduser("~"), ".phc-symbols-cache")
-        symbols_dir += os.sep
+        if not opts.parse_local:
+            # We will query the symbol server to get the stacks symbolized.
+            request = {
+                "memoryMap": memory_map_remote,
+                "stacks": []
+            }
+            for stack in [free_stack, alloc_stack]:
+                stacks = []
+                for addr in stack:
+                    (module, reladdr) = find_module(addr, module_memory_map)
 
-        if not os.path.exists(symbols_dir):
-            os.mkdir(symbols_dir)
+                    if module is None:
+                        stacks.append([0, 0])
+                        continue
 
-        for symbol_url in remote_symbols_files:
-            fetch_remote_symbols(symbol_url, symbols_dir)
+                    if module not in debugmap:
+                        stacks.append([0, 0])
+                        continue
 
-        sys.stderr.write("Loading downloaded symbols...")
-        load_symbols_recursive(symbols_dir)
-        print(" done!", file=sys.stderr)
+                    idx = 0
+                    found = False
+                    for map_entry in memory_map_remote:
+                        if map_entry[0] == debugmap[module]:
+                            found = True
+                            break
+                        idx += 1
+
+                    if not found:
+                        print("Error: Module entry not found: %s" % module, file=sys.stderr)
+                        return 2
+
+                    stacks.append([idx, reladdr])
+
+                request["stacks"].append(stacks)
+
+            symbol_server_response = requests.post("https://symbols.mozilla.org/symbolicate/v5", json=request).json()
+            if "results" not in symbol_server_response:
+                print("Error in server response: %s" % symbol_server_response, file=sys.stderr)
+                return 2
+        else:
+            # We will download the symbol files and parse them ourselves.
+            symbols_dir = os.path.join(os.path.expanduser("~"), ".phc-symbols-cache")
+            symbols_dir += os.sep
+
+            if not os.path.exists(symbols_dir):
+                os.mkdir(symbols_dir)
+
+            for symbol_url in remote_symbols_files:
+                fetch_remote_symbols(symbol_url, symbols_dir)
+
+            sys.stderr.write("Loading downloaded symbols...")
+            load_symbols_recursive(symbols_dir)
+            print(" done!", file=sys.stderr)
     else:
         extra_file = opts.rargs[0]
         symbols_dir = opts.rargs[1]
@@ -333,16 +403,7 @@ def main(argv=None):
         print("%s stack:" % name)
         print("")
         for addr in phc_stack:
-            # Step 1: Figure out which module this address belongs to
-            (module, reladdr) = (None, None)
-            for module_cand in module_memory_map:
-                base_addr = module_memory_map[module_cand][0]
-                end_addr = module_memory_map[module_cand][1]
-
-                if addr >= base_addr and addr < end_addr:
-                    module = module_cand
-                    reladdr = addr - base_addr
-                    break
+            (module, reladdr) = find_module(addr, module_memory_map)
 
             if not module:
                 print("#%s    (frame in unknown module)" % stack_cnt)
@@ -387,10 +448,24 @@ def main(argv=None):
 
             stack_cnt += 1
 
-    print("")
-    print_stack(free_stack, "Free", symbols, module_memory_map)
-    print("")
-    print_stack(alloc_stack, "Alloc", symbols, module_memory_map)
+    def print_stack_remote(stack, name):
+        print("%s stack:" % name)
+        print("")
+
+        for entry in stack:
+            print("#%s    %s (%s)" % (entry["frame"], entry["function"], entry["module"]))
+
+    if symbol_server_response:
+        stacks = symbol_server_response["results"][0]["stacks"]
+        print("")
+        print_stack_remote(stacks[0], "Free")
+        print("")
+        print_stack_remote(stacks[1], "Alloc")
+    else:
+        print("")
+        print_stack(free_stack, "Free", symbols, module_memory_map)
+        print("")
+        print_stack(alloc_stack, "Alloc", symbols, module_memory_map)
 
 
 if __name__ == '__main__':
