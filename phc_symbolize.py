@@ -167,21 +167,20 @@ def retrieve_file_line_data(symbol_entry, reladdr):
 
 def read_extra_file(extra_file):
     def make_stack_array(line):
-        return [int(x) for x in line.rstrip().split(sep="=")[1].split(",")]
+        return [int(x) for x in line.rstrip().split(",")]
 
     alloc_stack = None
     free_stack = None
     modules = None
 
     with open(extra_file, 'r') as extra_file_fd:
-        for line in extra_file_fd:
-            if line.startswith("PHCAllocStack"):
-                alloc_stack = make_stack_array(line)
-            elif line.startswith("PHCFreeStack"):
-                free_stack = make_stack_array(line)
-            elif line.startswith("StackTraces"):
-                obj = json.loads(line.split(sep="=")[1])
-                modules = obj["modules"]
+        data = json.load(extra_file_fd)
+        if "PHCAllocStack" in data:
+            alloc_stack = make_stack_array(data["PHCAllocStack"])
+        elif "PHCFreeStack" in data:
+            free_stack = make_stack_array(data["PHCFreeStack"])
+        elif "StackTraces" in data:
+            modules = json.loads(data["StackTraces"])["modules"]
 
     module_memory_map = {}
 
