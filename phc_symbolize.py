@@ -361,7 +361,7 @@ def main(argv=None):
 
                     request["stacks"].append(stacks)
 
-            symbol_server_response = requests.post("https://symbols.mozilla.org/symbolicate/v5", json=request).json()
+            symbol_server_response = requests.post("https://symbolication.services.mozilla.com/symbolicate/v5", json=request).json()
             if "results" not in symbol_server_response:
                 print("Error in server response: %s" % symbol_server_response, file=sys.stderr)
                 return 2
