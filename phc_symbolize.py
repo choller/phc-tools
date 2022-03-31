@@ -456,7 +456,17 @@ def main(argv=None):
         print("")
 
         for entry in stack:
-            print("#%s    %s (%s)" % (entry["frame"], entry["function"], entry["module"]))
+            frame = "???"
+            if "frame" in entry:
+                frame = entry["frame"]
+            function = "???"
+            if "function" in entry:
+                function = entry["function"]
+            module = "???"
+            if "module" in entry:
+                module = entry["module"]
+
+            print("#%s    %s (%s)" % (frame, function, module))
 
     if symbol_server_response:
         stacks = symbol_server_response["results"][0]["stacks"]
