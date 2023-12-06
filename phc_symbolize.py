@@ -374,7 +374,8 @@ def main(argv=None):
                 os.mkdir(symbols_dir)
 
             for symbol_url in remote_symbols_files:
-                fetch_remote_symbols(symbol_url, symbols_dir)
+                if symbol_url != None:
+                    fetch_remote_symbols(symbol_url, symbols_dir)
 
             sys.stderr.write("Loading downloaded symbols...")
             load_symbols_recursive(symbols_dir)
